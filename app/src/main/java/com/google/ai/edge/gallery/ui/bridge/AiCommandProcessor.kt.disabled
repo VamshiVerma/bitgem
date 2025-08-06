@@ -1,0 +1,252 @@
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.ai.edge.gallery.ui.bridge
+
+import android.util.Log
+
+/**
+ * Processes AI-related commands in BitChat messages
+ * Extends BitChat's command system to support Gallery AI integration
+ */
+class AiCommandProcessor {
+    
+    private val bridge = GalleryBitchatBridge.getInstance()
+    
+    /**
+     * Process a message to check for AI commands
+     * Returns true if the message was handled as an AI command
+     */
+    fun processMessage(message: String): Boolean {
+        val trimmedMessage = message.trim()
+        
+        return when {
+            trimmedMessage.startsWith("/ai analyze ") -> {
+                handleAiAnalysisCommand(trimmedMessage.substring(12))
+                true
+            }
+            trimmedMessage.startsWith("/ai ") -> {
+                handleAiChatCommand(trimmedMessage.substring(4))
+                true
+            }
+            trimmedMessage.startsWith("/generate ") -> {
+                handleImageGenerationCommand(trimmedMessage.substring(10))
+                true
+            }
+            trimmedMessage.startsWith("/classify ") -> {
+                handleClassificationCommand(trimmedMessage.substring(10))
+                true
+            }
+            trimmedMessage.equals("/ai-help", ignoreCase = true) -> {
+                handleAiHelpCommand()
+                true
+            }
+            trimmedMessage.equals("/ai-capabilities", ignoreCase = true) -> {
+                handleCapabilitiesCommand()
+                true
+            }
+            trimmedMessage.startsWith("/collaborate ") -> {
+                handleCollaborativeSessionCommand(trimmedMessage.substring(13))
+                true
+            }
+            else -> false
+        }
+    }
+    
+    /**
+     * Get list of available AI commands for command suggestions
+     */
+    fun getAiCommands(): List<AiCommand> {
+        return listOf(
+            AiCommand(
+                command = "/ai",
+                description = "Chat with AI",
+                usage = "/ai [your message]",
+                example = "/ai What's the weather like?"
+            ),
+            AiCommand(
+                command = "/ai analyze",
+                description = "AI situation analysis",
+                usage = "/ai analyze [situation description]",
+                example = "/ai analyze Building collapse, 5 people trapped"
+            ),
+            AiCommand(
+                command = "/generate",
+                description = "Generate an image",
+                usage = "/generate [image description]",
+                example = "/generate A sunset over mountains"
+            ),
+            AiCommand(
+                command = "/classify",
+                description = "Classify text content",
+                usage = "/classify [text to classify]",
+                example = "/classify This is a great product review"
+            ),
+            AiCommand(
+                command = "/ai-help",
+                description = "Show AI command help",
+                usage = "/ai-help",
+                example = "/ai-help"
+            ),
+            AiCommand(
+                command = "/ai-capabilities",
+                description = "Show available AI capabilities",
+                usage = "/ai-capabilities",
+                example = "/ai-capabilities"
+            ),
+            AiCommand(
+                command = "/collaborate",
+                description = "Start collaborative AI session",
+                usage = "/collaborate [topic] [initial prompt]",
+                example = "/collaborate brainstorm Let's think of app ideas"
+            )
+        )
+    }
+    
+    private fun handleAiChatCommand(prompt: String) {
+        if (prompt.isBlank()) {
+            bridge.sendAiMessageThroughMesh(
+                "❌ AI Chat: Please provide a message. Usage: /ai [your message]",
+                AiMessageType.RESPONSE
+            )
+            return
+        }
+        
+        Log.d("AiCommandProcessor", "Processing AI chat command: $prompt")
+        
+        // Use the real Gallery AI models through the bridge
+        bridge.generateAiResponse(prompt)
+    }
+    
+    private fun handleAiAnalysisCommand(analysisPrompt: String) {
+        if (analysisPrompt.isBlank()) {
+            bridge.sendAiMessageThroughMesh(
+                "❌ AI Analysis: Please provide analysis context. Usage: /ai analyze [situation description]",
+                AiMessageType.RESPONSE
+            )
+            return
+        }
+        
+        Log.d("AiCommandProcessor", "Processing AI analysis command: $analysisPrompt")
+        
+        // Enhanced analysis prompt for more detailed responses
+        val enhancedPrompt = "Analyze this situation in detail: $analysisPrompt\n\n" +
+                "Please provide:\n" +
+                "1. Assessment of the situation\n" +
+                "2. Key factors and risks\n" +
+                "3. Recommended actions\n" +
+                "4. Additional considerations"
+        
+        bridge.generateAiResponse(enhancedPrompt)
+    }
+    
+    private fun handleImageGenerationCommand(description: String) {
+        if (description.isBlank()) {
+            bridge.sendAiMessageThroughMesh(
+                "❌ Image Generation: Please provide a description. Usage: /generate [image description]",
+                AiMessageType.RESPONSE
+            )
+            return
+        }
+        
+        Log.d("AiCommandProcessor", "Processing image generation command: $description")
+        
+        val response = "🎨 Generating image: \"$description\"\n\n" +
+                "⏳ This would use Gallery's image generation models to create an image based on your description. " +
+                "The generated image would be shared with the mesh network!"
+        
+        bridge.shareAiImageThroughMesh(description)
+        bridge.sendAiMessageThroughMesh(response, AiMessageType.IMAGE)
+    }
+    
+    private fun handleClassificationCommand(text: String) {
+        if (text.isBlank()) {
+            bridge.sendAiMessageThroughMesh(
+                "❌ Classification: Please provide text to classify. Usage: /classify [text]",
+                AiMessageType.RESPONSE
+            )
+            return
+        }
+        
+        Log.d("AiCommandProcessor", "Processing classification command: $text")
+        
+        val response = "🔍 Classifying text: \"$text\"\n\n" +
+                "📊 This would use Gallery's text classification models to analyze and categorize the text. " +
+                "Results would show sentiment, topic, and other classifications!"
+        
+        bridge.processIncomingMessageWithAI(text, "self", AiProcessingType.CLASSIFY_CONTENT)
+        bridge.sendAiMessageThroughMesh(response, AiMessageType.RESPONSE)
+    }
+    
+    private fun handleAiHelpCommand() {
+        val helpText = """
+            🤖 AI Commands Help
+            
+            Available AI commands:
+            
+            💬 /ai [message] - Chat with AI
+            🎨 /generate [description] - Generate images
+            🔍 /classify [text] - Classify content
+            🤝 /collaborate [topic] [prompt] - Start AI collaboration
+            🧠 /ai-capabilities - Show AI features
+            ❓ /ai-help - Show this help
+            
+            Example:
+            /ai What's quantum computing?
+            /generate A robot playing chess
+            /classify This movie is amazing!
+            
+            All AI responses are shared with the mesh network!
+        """.trimIndent()
+        
+        bridge.sendAiMessageThroughMesh(helpText, AiMessageType.CAPABILITIES)
+    }
+    
+    private fun handleCapabilitiesCommand() {
+        bridge.shareAiCapabilities()
+    }
+    
+    private fun handleCollaborativeSessionCommand(args: String) {
+        val parts = args.split(" ", limit = 2)
+        if (parts.size < 2) {
+            bridge.sendAiMessageThroughMesh(
+                "❌ Collaborative Session: Usage: /collaborate [topic] [initial prompt]",
+                AiMessageType.RESPONSE
+            )
+            return
+        }
+        
+        val topic = parts[0]
+        val initialPrompt = parts[1]
+        
+        Log.d("AiCommandProcessor", "Starting collaborative AI session: $topic")
+        bridge.startCollaborativeAiSession(topic, initialPrompt)
+    }
+    
+    companion object {
+        private const val TAG = "AiCommandProcessor"
+    }
+}
+
+/**
+ * Represents an AI command available in BitChat
+ */
+data class AiCommand(
+    val command: String,
+    val description: String,
+    val usage: String,
+    val example: String
+)

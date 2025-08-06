@@ -1,0 +1,1010 @@
+/*
+ * Copyright 2025 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.google.ai.edge.gallery.ui.bridge
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.ColorSpace
+import android.graphics.ImageDecoder
+import android.os.Build
+import android.provider.MediaStore
+import android.util.Log
+import androidx.lifecycle.viewModelScope
+import com.bitchat.android.ui.ChatViewModel
+import com.google.ai.edge.gallery.data.Model
+import com.google.ai.edge.gallery.data.TASK_LLM_ASK_IMAGE
+import com.google.ai.edge.gallery.ui.common.chat.ChatMessageText
+import com.google.ai.edge.gallery.ui.common.chat.ChatSide
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+
+/**
+ * Bridge that allows Gallery AI functionality to communicate with BitChat mesh network.
+ * This enables users to:
+ * 1. Send AI-generated responses through the mesh network
+ * 2. Process incoming messages with Gallery's AI models
+ * 3. Share AI-generated content (images, text) across the mesh
+ */
+class GalleryBitchatBridge {
+    
+    private val _aiToMeshMessages = MutableSharedFlow<AiToMeshMessage>()
+    val aiToMeshMessages: SharedFlow<AiToMeshMessage> = _aiToMeshMessages.asSharedFlow()
+    
+    private val _meshToAiMessages = MutableSharedFlow<MeshToAiMessage>()
+    val meshToAiMessages: SharedFlow<MeshToAiMessage> = _meshToAiMessages.asSharedFlow()
+    
+    private var context: Context? = null
+    private var bitchatViewModel: ChatViewModel? = null
+    private var galleryLlmViewModel: com.google.ai.edge.gallery.ui.llmchat.LlmChatViewModel? = null
+    private var galleryImageGenViewModel: com.google.ai.edge.gallery.ui.imagegeneration.ImageGenerationViewModel? = null
+    private var galleryTextClassViewModel: com.google.ai.edge.gallery.ui.textclassification.TextClassificationViewModel? = null
+    
+    // Track streaming messages for proper bubble updates
+    private val streamingMessages = mutableMapOf<String, String>()
+    private val streamingMessageIds = mutableMapOf<String, String>()
+    
+    /**
+     * Initialize the bridge with BitChat and Gallery ViewModels
+     */
+    fun initialize(
+        context: Context,
+        bitchatViewModel: ChatViewModel,
+        llmViewModel: com.google.ai.edge.gallery.ui.llmchat.LlmChatViewModel,
+        imageGenViewModel: com.google.ai.edge.gallery.ui.imagegeneration.ImageGenerationViewModel,
+        textClassViewModel: com.google.ai.edge.gallery.ui.textclassification.TextClassificationViewModel
+    ) {
+        this.context = context
+        this.bitchatViewModel = bitchatViewModel
+        this.galleryLlmViewModel = llmViewModel
+        this.galleryImageGenViewModel = imageGenViewModel
+        this.galleryTextClassViewModel = textClassViewModel
+        Log.d("GalleryBitchatBridge", "GalleryBitchatBridge initialized with AI ViewModels")
+        
+        // Set up observers to monitor AI responses and forward them to BitChat
+        setupAiResponseObservers()
+        
+        // Try to auto-initialize models if available
+        autoInitializeModels()
+    }
+    
+    /**
+     * Set up observers to monitor AI model responses and forward them to BitChat
+     */
+    private fun setupAiResponseObservers() {
+        galleryLlmViewModel?.let { llmViewModel ->
+            // Observe LLM responses
+            // Note: This is a simplified approach. In a real implementation, 
+            // you might need to track which responses are from AI commands vs normal Gallery usage
+            Log.d("GalleryBitchatBridge", "Setting up LLM response observer")
+        }
+    }
+    
+    /**
+     * Automatically initialize AI models if they're available and not yet loaded
+     */
+    private fun autoInitializeModels() {
+        galleryLlmViewModel?.let { llmViewModel ->
+            bitchatViewModel?.viewModelScope?.launch {
+                try {
+                    val availableModels = llmViewModel.task.models
+                    Log.d("GalleryBitchatBridge", "Auto-initializing models: ${availableModels.size} available")
+                    
+                    if (availableModels.isNotEmpty()) {
+                        // Check if any models are actually downloaded
+                        val downloadedModels = availableModels.filter { model ->
+                            context?.let { ctx ->
+                                val modelPath = model.getPath(ctx)
+                                java.io.File(modelPath).exists()
+                            } ?: false
+                        }
+                        
+                        if (downloadedModels.isNotEmpty()) {
+                            val model = downloadedModels.first()
+                            sendAiMessageThroughMesh(
+                                "🤖 AI Bridge Connected!\n\n" +
+                                "Model: ${model.name} ✅\n" +
+                                "Status: Downloaded and ready\n\n" +
+                                "Type /ai [your message] to chat!",
+                                AiMessageType.RESPONSE
+                            )
+                        } else {
+                            sendAiMessageThroughMesh(
+                                "🤖 AI Bridge Connected!\n\n" +
+                                "⚠️ Models configured but not downloaded:\n" +
+                                "${availableModels.map { it.name }.joinToString(", ")}\n\n" +
+                                "📱 Go to Gallery tab → Download a model first",
+                                AiMessageType.RESPONSE
+                            )
+                        }
+                    } else {
+                        Log.d("GalleryBitchatBridge", "No models available for auto-initialization")
+                        sendAiMessageThroughMesh(
+                            "📥 No AI Models Found\n\n" +
+                            "Please go to Gallery tab to download AI models first.",
+                            AiMessageType.RESPONSE
+                        )
+                    }
+                } catch (e: Exception) {
+                    Log.e("GalleryBitchatBridge", "Error during auto-initialization", e)
+                    sendAiMessageThroughMesh(
+                        "❌ AI initialization error: ${e.message ?: "Unknown error"}",
+                        AiMessageType.RESPONSE
+                    )
+                }
+            }
+        }
+    }
+    
+    /**
+     * Send an AI-generated message through the BitChat mesh network
+     */
+    fun sendAiMessageThroughMesh(
+        message: String,
+        messageType: AiMessageType = AiMessageType.TEXT,
+        metadata: Map<String, String> = emptyMap()
+    ) {
+        bitchatViewModel?.let { viewModel ->
+            // For status updates, send message as-is (already has emoji)
+            // For other messages, add formatting
+            val formattedMessage = if (messageType == AiMessageType.RESPONSE && 
+                (message.startsWith("🤖") || message.startsWith("💭") || message.startsWith("⏰") || message.startsWith("❌"))) {
+                message // Already formatted status messages
+            } else {
+                formatAiMessage(message, messageType, metadata)
+            }
+            viewModel.sendMessage(formattedMessage)
+            Log.d("GalleryBitchatBridge", "AI message sent through mesh: $messageType - '$formattedMessage'")
+        } ?: run {
+            Log.w("GalleryBitchatBridge", "BitChat ViewModel not initialized, cannot send AI message")
+        }
+    }
+    
+    /**
+     * Process an incoming mesh message with Gallery AI
+     */
+    fun processIncomingMessageWithAI(
+        message: String,
+        senderInfo: String,
+        processingType: AiProcessingType = AiProcessingType.GENERATE_RESPONSE
+    ) {
+        when (processingType) {
+            AiProcessingType.GENERATE_RESPONSE -> {
+                val prompt = "Someone in the mesh network said: \"$message\". Generate a helpful response."
+                generateAiResponse(prompt)
+            }
+            AiProcessingType.CLASSIFY_CONTENT -> {
+                // TODO: Implement proper classification
+                Log.d("GalleryBitchatBridge", "Classifying message from $senderInfo")
+            }
+            AiProcessingType.EXTRACT_SUMMARY -> {
+                // TODO: Implement proper summarization
+                Log.d("GalleryBitchatBridge", "Summarizing message from $senderInfo")
+            }
+        }
+    }
+    
+    /**
+     * Share AI-generated image through mesh network
+     */
+    fun shareAiImageThroughMesh(
+        imageDescription: String,
+        imageData: ByteArray? = null
+    ) {
+        val message = if (imageData != null) {
+            "🎨 AI Generated Image: $imageDescription [Image data: ${imageData.size} bytes]"
+        } else {
+            "🎨 AI Image Prompt: $imageDescription"
+        }
+        sendAiMessageThroughMesh(message, AiMessageType.IMAGE, mapOf("description" to imageDescription))
+    }
+    
+    /**
+     * Create a collaborative AI session through mesh
+     */
+    fun startCollaborativeAiSession(
+        sessionTopic: String,
+        initialPrompt: String
+    ) {
+        val message = "🤖 Starting collaborative AI session: $sessionTopic\n\nInitial prompt: $initialPrompt\n\nJoin the conversation!"
+        sendAiMessageThroughMesh(
+            message, 
+            AiMessageType.COLLABORATIVE_SESSION,
+            mapOf("topic" to sessionTopic, "prompt" to initialPrompt)
+        )
+    }
+    
+    /**
+     * Send AI model information/capabilities to mesh
+     */
+    fun shareAiCapabilities() {
+        val capabilities = """
+            🧠 Available AI Capabilities:
+            
+            💬 LLM Chat - Conversational AI
+            🖼️ Image Generation - Create images from text
+            🔍 Image Classification - Analyze images
+            📝 Text Classification - Categorize text
+            
+            Type /ai [your message] to use AI through mesh!
+        """.trimIndent()
+        
+        sendAiMessageThroughMesh(capabilities, AiMessageType.CAPABILITIES)
+    }
+    
+    private fun formatAiMessage(
+        message: String,
+        type: AiMessageType,
+        metadata: Map<String, String>
+    ): String {
+        val prefix = when (type) {
+            AiMessageType.TEXT -> "🤖 AI:"
+            AiMessageType.IMAGE -> "🎨 AI Image:"
+            AiMessageType.CAPABILITIES -> "🧠 AI Capabilities:"
+            AiMessageType.COLLABORATIVE_SESSION -> "🤝 AI Session:"
+            AiMessageType.RESPONSE -> "💡 AI Response:"
+        }
+        
+        return "$prefix $message"
+    }
+    
+    /**
+     * Generate AI response using Gallery's LLM models (text only)
+     */
+    fun generateAiResponse(prompt: String) {
+        galleryLlmViewModel?.let { llmViewModel ->
+            Log.d("GalleryBitchatBridge", "Generating AI response using Gallery LLM")
+            
+            try {
+                // Get available models from the task
+                val availableModels = llmViewModel.task.models
+                
+                when {
+                    availableModels.isEmpty() -> {
+                        sendAiMessageThroughMesh(
+                            "🤖 AI Ready! But no models available.\n\n" +
+                            "📱 Please go to Gallery tab → Download an LLM model → Return to BitChat",
+                            AiMessageType.RESPONSE
+                        )
+                    }
+                    
+                    else -> {
+                        // Find any downloaded model (text analysis doesn't require vision support)
+                        val downloadedModel = availableModels.find { model ->
+                            context?.let { ctx ->
+                                val modelPath = model.getPath(ctx)
+                                java.io.File(modelPath).exists()
+                            } ?: false
+                        }
+                        
+                        if (downloadedModel != null) {
+                            Log.d("GalleryBitchatBridge", "Found downloaded model for text analysis: ${downloadedModel.name}")
+                            generateActualAiResponse(downloadedModel, prompt)
+                        } else {
+                            sendAiMessageThroughMesh(
+                                "📥 AI Models Not Downloaded\n\n" +
+                                "Available models: ${availableModels.map { it.name }.joinToString(", ")}\n\n" +
+                                "Please go to Gallery tab → Download a model → Return to BitChat\n" +
+                                "Models need to be downloaded before use.",
+                                AiMessageType.RESPONSE
+                            )
+                        }
+                    }
+                }
+                
+            } catch (e: Exception) {
+                Log.e("GalleryBitchatBridge", "Error generating AI response", e)
+                sendAiMessageThroughMesh(
+                    "❌ AI Error: ${e.message ?: "Unknown error occurred"}",
+                    AiMessageType.RESPONSE
+                )
+            }
+        } ?: run {
+            Log.w("GalleryBitchatBridge", "Gallery LLM ViewModel not initialized")
+            sendAiMessageThroughMesh(
+                "❌ AI Service Unavailable: Gallery AI not initialized.",
+                AiMessageType.RESPONSE
+            )
+        }
+    }
+    
+    /**
+     * Generate AI response for image analysis using Gallery's LLM models
+     */
+    fun generateAiImageAnalysis(prompt: String, imageUri: android.net.Uri) {
+        galleryLlmViewModel?.let { llmViewModel ->
+            Log.d("GalleryBitchatBridge", "Generating AI image analysis using Gallery LLM")
+            
+            try {
+                // Get vision-capable models from TASK_LLM_ASK_IMAGE (not regular chat models!)
+                val visionModels = TASK_LLM_ASK_IMAGE.models
+                
+                when {
+                    visionModels.isEmpty() -> {
+                        sendAiMessageThroughMesh(
+                            "🤖 No vision-capable models available for image analysis.\n\n" +
+                            "📱 Please go to Gallery tab → Download a vision model (like Gemini with image support) → Return to BitChat",
+                            AiMessageType.RESPONSE
+                        )
+                    }
+                    
+                    else -> {
+                        // Find a downloaded vision model from TASK_LLM_ASK_IMAGE
+                        val downloadedVisionModel = visionModels.find { model ->
+                            context?.let { ctx ->
+                                val modelPath = model.getPath(ctx)
+                                java.io.File(modelPath).exists()
+                            } ?: false
+                        }
+                        
+                        if (downloadedVisionModel != null) {
+                            Log.d("GalleryBitchatBridge", "Found downloaded vision model for image analysis: ${downloadedVisionModel.name} (llmSupportImage=${downloadedVisionModel.llmSupportImage})")
+                            generateActualAiImageResponse(downloadedVisionModel, prompt, imageUri)
+                        } else {
+                            // List available vision models to help user
+                            val visionModelNames = visionModels.map { it.name }.joinToString(", ")
+                            sendAiMessageThroughMesh(
+                                "📥 Vision models not downloaded for image analysis\n\n" +
+                                "Available vision models: $visionModelNames\n\n" +
+                                "📱 Go to Gallery tab → Download one of these models → Return to BitChat\n\n" +
+                                "💡 Note: Only vision-capable models can analyze images.",
+                                AiMessageType.RESPONSE
+                            )
+                    }
+                }
+                
+            } catch (e: Exception) {
+                Log.e("GalleryBitchatBridge", "Error generating AI image analysis", e)
+                sendAiMessageThroughMesh(
+                    "❌ AI Image Analysis Error: ${e.message ?: "Unknown error occurred"}",
+                    AiMessageType.RESPONSE
+                )
+            }
+        } ?: run {
+            Log.w("GalleryBitchatBridge", "Gallery LLM ViewModel not initialized for image analysis")
+            sendAiMessageThroughMesh(
+                "❌ AI Service Unavailable: Gallery AI not initialized for image analysis.",
+                AiMessageType.RESPONSE
+            )
+        }
+    }
+    
+    /**
+     * Generate actual AI image analysis response using DIRECT LLM inference
+     */
+    private fun generateActualAiImageResponse(model: Model, prompt: String, imageUri: android.net.Uri) {
+        Log.d("GalleryBitchatBridge", "Generating DIRECT AI image analysis with model: ${model.name}")
+        
+        bitchatViewModel?.viewModelScope?.launch {
+            try {
+                // Convert URI to Bitmap for image analysis with ARGB_8888 config
+                val bitmap = context?.let { ctx ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        val source = ImageDecoder.createSource(ctx.contentResolver, imageUri)
+                        ImageDecoder.decodeBitmap(source) { decoder, info, source ->
+                            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                            decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
+                        }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val originalBitmap = MediaStore.Images.Media.getBitmap(ctx.contentResolver, imageUri)
+                        // Ensure ARGB_8888 configuration
+                        if (originalBitmap.config != Bitmap.Config.ARGB_8888) {
+                            originalBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        } else {
+                            originalBitmap
+                        }
+                    }
+                }?.let { originalBitmap ->
+                    // Ensure the final bitmap has ARGB_8888 config
+                    if (originalBitmap.config != Bitmap.Config.ARGB_8888) {
+                        Log.d("GalleryBitchatBridge", "Converting bitmap from ${originalBitmap.config} to ARGB_8888")
+                        originalBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                    } else {
+                        originalBitmap
+                    }
+                }
+                
+                if (bitmap == null) {
+                    sendAiMessageThroughMesh(
+                        "❌ Failed to load image for analysis",
+                        AiMessageType.RESPONSE
+                    )
+                    return@launch
+                }
+                
+                // Use direct inference with image for proper BitChat streaming
+                if (model.instance == null) {
+                    sendAiMessageThroughMesh(
+                        "🔄 Initializing ${model.name} for image analysis...",
+                        AiMessageType.RESPONSE
+                    )
+                    
+                    // Initialize the model using the same method Gallery uses
+                    context?.let { ctx ->
+                        com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper.initialize(
+                            context = ctx,
+                            model = model,
+                            onDone = { errorMessage ->
+                                if (errorMessage.isEmpty()) {
+                                    Log.d("GalleryBitchatBridge", "Model initialization successful for image analysis")
+                                    // Now run the actual inference with image
+                                    runDirectInferenceWithImage(model, prompt, bitmap)
+                                } else {
+                                    Log.e("GalleryBitchatBridge", "Model initialization failed: $errorMessage")
+                                    sendAiMessageThroughMesh(
+                                        "❌ AI Image Analysis Initialization Failed: $errorMessage",
+                                        AiMessageType.RESPONSE
+                                    )
+                                }
+                            }
+                        )
+                    }
+                } else {
+                    // Model already initialized, run inference directly
+                    runDirectInferenceWithImage(model, prompt, bitmap)
+                }
+                
+            } catch (e: Exception) {
+                Log.e("GalleryBitchatBridge", "Error in image analysis", e)
+                sendAiMessageThroughMesh(
+                    "❌ Image Analysis Error: ${e.message}",
+                    AiMessageType.RESPONSE
+                )
+            }
+        }
+    }
+    
+    /**
+     * Generate actual AI response using DIRECT LLM inference - handles initialization automatically
+     */
+    private fun generateActualAiResponse(model: Model, prompt: String) {
+        Log.d("GalleryBitchatBridge", "Generating DIRECT AI response with model: ${model.name}")
+        
+        bitchatViewModel?.viewModelScope?.launch {
+            try {
+                // Check if model needs initialization
+                if (model.instance == null) {
+                    sendAiMessageThroughMesh(
+                        "🔄 Initializing ${model.name}...",
+                        AiMessageType.RESPONSE
+                    )
+                    
+                    // Initialize the model using the same method Gallery uses
+                    context?.let { ctx ->
+                        com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper.initialize(
+                            context = ctx,
+                            model = model,
+                            onDone = { errorMessage ->
+                                if (errorMessage.isEmpty()) {
+                                    Log.d("GalleryBitchatBridge", "Model initialization successful")
+                                    // Now run the actual inference
+                                    runDirectInference(model, prompt)
+                                } else {
+                                    Log.e("GalleryBitchatBridge", "Model initialization failed: $errorMessage")
+                                    sendAiMessageThroughMesh(
+                                        "❌ AI Initialization Failed: $errorMessage",
+                                        AiMessageType.RESPONSE
+                                    )
+                                }
+                            }
+                        )
+                    } ?: run {
+                        sendAiMessageThroughMesh(
+                            "❌ Context not available for model initialization",
+                            AiMessageType.RESPONSE
+                        )
+                    }
+                } else {
+                    // Model already initialized, run inference directly
+                    runDirectInference(model, prompt)
+                }
+                
+            } catch (e: Exception) {
+                Log.e("GalleryBitchatBridge", "Error in AI response generation", e)
+                sendAiMessageThroughMesh(
+                    "❌ AI Error: ${e.message ?: "Failed to generate response"}",
+                    AiMessageType.RESPONSE
+                )
+            }
+        }
+    }
+    
+    /**
+     * Run LLM inference WITH IMAGE - BUBBLE STREAMING for image analysis
+     */
+    private fun runDirectInferenceWithImage(model: Model, prompt: String, image: Bitmap) {
+        Log.d("GalleryBitchatBridge", "Starting BUBBLE STREAMING inference WITH IMAGE for: ${model.name}")
+        
+        // Send initial thinking message and track it for updates
+        val initialContent = "🔍 ${model.name}: analyzing image..."
+        var lastAiMessageId: String? = null
+        val startTime = System.currentTimeMillis()
+        var isCancelled = false
+        var hasCompleted = false
+        
+        try {
+            val viewModel = bitchatViewModel
+            viewModel?.viewModelScope?.launch(Dispatchers.Main) {
+                // Send initial message LOCALLY only (don't broadcast during streaming)
+                Log.d("GalleryBitchatBridge", "Creating local AI image analysis thinking message: '$initialContent'")
+                val localMessage = com.bitchat.android.model.BitchatMessage(
+                    sender = "AI",
+                    content = initialContent,
+                    timestamp = java.util.Date(),
+                    isRelay = false,
+                    senderPeerID = "ai-local"
+                )
+                viewModel.addLocalMessage(localMessage)
+                
+                kotlinx.coroutines.delay(200)
+                
+                // Find the most recently sent message
+                val messages = viewModel.messages.value ?: emptyList()
+                val mostRecentMessage = messages.lastOrNull { it.content == initialContent }
+                    ?: messages.lastOrNull { it.timestamp.time > (System.currentTimeMillis() - 2000) }
+                    ?: messages.lastOrNull()
+                
+                lastAiMessageId = mostRecentMessage?.id
+                Log.d("GalleryBitchatBridge", "Created initial AI image analysis bubble, tracking ID: $lastAiMessageId")
+            }
+            
+            // Accumulate the response as tokens come in
+            val accumulatedResponse = StringBuilder()
+            var tokenCount = 0
+            val CHUNK_SIZE = 3
+            
+            // Send immediate status update to all users
+            sendAiMessageThroughMesh("🔍 AI started analyzing your image...", AiMessageType.RESPONSE)
+            
+            // Use Gallery's EXACT inference method with image support
+            com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper.runInference(
+                model = model,
+                input = prompt,
+                image = image, // Pass the image for analysis
+                resultListener = { partialResult, done ->
+                    try {
+                        if (isCancelled) return@runInference
+                        
+                        Log.d("GalleryBitchatBridge", "LLM image analysis streaming: done=$done, token='$partialResult'")
+                        
+                        // Accumulate each token
+                        if (partialResult.isNotEmpty()) {
+                            accumulatedResponse.append(partialResult)
+                            tokenCount++
+                            
+                            // Update bubble every few tokens or when done
+                            if (tokenCount % CHUNK_SIZE == 0 || done) {
+                                val currentContent = accumulatedResponse.toString()
+                                val localViewModel = bitchatViewModel
+                                localViewModel?.viewModelScope?.launch(Dispatchers.Main) {
+                                    if (isCancelled) return@launch
+                                    
+                                    val streamingIndicator = if (done) " ✓" else " 🔍"
+                                    val updatedContent = "🔍 ${model.name}: $currentContent$streamingIndicator"
+                                    
+                                    lastAiMessageId?.let { messageId ->
+                                        localViewModel.updateMessage(messageId, updatedContent)
+                                        Log.d("GalleryBitchatBridge", "Updated AI image analysis bubble: $tokenCount tokens, done=$done")
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // When done, ensure final clean message
+                        if (done) {
+                            hasCompleted = true
+                            val localViewModel = bitchatViewModel
+                            localViewModel?.viewModelScope?.launch(Dispatchers.Main) {
+                                if (isCancelled) return@launch
+                                
+                                val finalResponse = accumulatedResponse.toString().trim()
+                                if (finalResponse.isNotEmpty()) {
+                                    val finalContent = "🔍 ${model.name}: $finalResponse ✓"
+                                    lastAiMessageId?.let { messageId ->
+                                        localViewModel.updateMessage(messageId, finalContent)
+                                        Log.d("GalleryBitchatBridge", "AI image analysis bubble streaming completed: '$finalResponse'")
+                                        
+                                        // NOW send the final response to all connected devices
+                                        sendAiMessageThroughMesh(
+                                            "📸 Image Analysis Result: $finalResponse", 
+                                            AiMessageType.RESPONSE
+                                        )
+                                        Log.d("GalleryBitchatBridge", "AI image analysis broadcasted to mesh network: '$finalResponse'")
+                                    }
+                                } else {
+                                    lastAiMessageId?.let { messageId ->
+                                        localViewModel.updateMessage(messageId, "🔍 ${model.name}: [No analysis generated] ❌")
+                                    }
+                                    sendAiMessageThroughMesh(
+                                        "🤖 AI could not analyze the image. Please try with a clearer image.",
+                                        AiMessageType.RESPONSE
+                                    )
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("GalleryBitchatBridge", "Error in image analysis streaming callback", e)
+                        isCancelled = true
+                        hasCompleted = true
+                        
+                        sendAiMessageThroughMesh(
+                            "❌ AI image analysis failed: ${e.message ?: "Unknown error"}",
+                            AiMessageType.RESPONSE
+                        )
+                    }
+                },
+                cleanUpListener = {
+                    Log.d("GalleryBitchatBridge", "LLM image analysis cleanup completed")
+                    hasCompleted = true
+                }
+            )
+            
+        } catch (e: Exception) {
+            Log.e("GalleryBitchatBridge", "Error starting AI image analysis", e)
+            hasCompleted = true
+            
+            sendAiMessageThroughMesh(
+                "❌ Failed to start AI image analysis: ${e.message ?: "Unknown startup error"}",
+                AiMessageType.RESPONSE
+            )
+        }
+    }
+    
+    /**
+     * Run the actual LLM inference - BUBBLE STREAMING with comprehensive error handling
+     */
+    private fun runDirectInference(model: Model, prompt: String) {
+        Log.d("GalleryBitchatBridge", "Starting BUBBLE STREAMING inference for: ${model.name}")
+        
+        // Send initial thinking message and track it for updates
+        val initialContent = "🤖 ${model.name}: thinking..."
+        var lastAiMessageId: String? = null
+        val startTime = System.currentTimeMillis()
+        var isCancelled = false
+        var hasCompleted = false
+        
+        try {
+            
+            val viewModel = bitchatViewModel
+            viewModel?.viewModelScope?.launch(Dispatchers.Main) {
+                // Send initial message LOCALLY only (don't broadcast during streaming)
+                Log.d("GalleryBitchatBridge", "Creating local AI thinking message: '$initialContent'")
+                // Create message locally without broadcasting to mesh network
+                val localMessage = com.bitchat.android.model.BitchatMessage(
+                    sender = "AI",
+                    content = initialContent,
+                    timestamp = java.util.Date(),
+                    isRelay = false,
+                    senderPeerID = "ai-local"
+                )
+                viewModel.addLocalMessage(localMessage)
+                
+                // Give the message a moment to be added to the list
+                kotlinx.coroutines.delay(200)
+                
+                // Find the most recently sent message (it should be our AI message)
+                val messages = viewModel.messages.value ?: emptyList()
+                Log.d("GalleryBitchatBridge", "Current messages count: ${messages.size}")
+                messages.forEachIndexed { index, msg -> 
+                    Log.d("GalleryBitchatBridge", "Message $index: sender='${msg.sender}', content='${msg.content}', id='${msg.id}'")
+                }
+                
+                // Try different approaches to find our message
+                val mostRecentMessage = messages.lastOrNull { it.content == initialContent }
+                    ?: messages.lastOrNull { it.timestamp.time > (System.currentTimeMillis() - 2000) }
+                    ?: messages.lastOrNull()
+                
+                lastAiMessageId = mostRecentMessage?.id
+                
+                Log.d("GalleryBitchatBridge", "Created initial AI bubble, tracking ID: $lastAiMessageId")
+                Log.d("GalleryBitchatBridge", "Matched message: sender='${mostRecentMessage?.sender}', content='${mostRecentMessage?.content}'")
+                
+                if (lastAiMessageId == null) {
+                    Log.w("GalleryBitchatBridge", "Could not find AI message ID, found ${messages.size} messages")
+                }
+            }
+            
+            // Set up timeout monitoring for extremely long responses
+            val TIMEOUT_DURATION = 120000L // 2 minutes timeout
+            viewModel?.viewModelScope?.launch {
+                kotlinx.coroutines.delay(TIMEOUT_DURATION)
+                if (!hasCompleted && !isCancelled) {
+                    Log.w("GalleryBitchatBridge", "AI inference timeout after ${TIMEOUT_DURATION}ms")
+                    isCancelled = true
+                    
+                    // Notify all users about timeout
+                    sendAiMessageThroughMesh(
+                        "⏰ AI processing timed out after 2 minutes. Please try again with a shorter prompt.",
+                        AiMessageType.RESPONSE
+                    )
+                    
+                    // Update local bubble
+                    viewModel.viewModelScope?.launch(Dispatchers.Main) {
+                        lastAiMessageId?.let { messageId ->
+                            viewModel.updateMessage(messageId, "🤖 ${model.name}: Request timed out ⏰")
+                        }
+                    }
+                }
+            }
+            
+            // Accumulate the response as tokens come in
+            val accumulatedResponse = StringBuilder()
+            var tokenCount = 0
+            val CHUNK_SIZE = 3 // Update bubble every 3 tokens for smooth streaming
+            var lastStatusUpdate = System.currentTimeMillis()
+            var statusUpdateInterval = 5000L // Start with 5 seconds (faster feedback)
+            var consecutiveFailures = 0
+            
+            // Send immediate status update to all users
+            sendAiMessageThroughMesh("💭 AI started processing your request...", AiMessageType.RESPONSE)
+            
+            // Use the EXACT same inference method that Gallery uses
+            com.google.ai.edge.gallery.ui.llmchat.LlmChatModelHelper.runInference(
+                model = model,
+                input = prompt,
+                resultListener = { partialResult, done ->
+                    try {
+                        if (isCancelled) return@runInference // Skip if cancelled
+                        
+                        Log.d("GalleryBitchatBridge", "LLM streaming: done=$done, token='$partialResult'")
+                        
+                        // Reset failure counter on successful token
+                        if (partialResult.isNotEmpty()) {
+                            consecutiveFailures = 0
+                        }
+                        
+                        // Accumulate each token
+                        if (partialResult.isNotEmpty()) {
+                            accumulatedResponse.append(partialResult)
+                            tokenCount++
+                            
+                            // Progressive status updates - more frequent for longer responses
+                            val now = System.currentTimeMillis()
+                            val elapsedTime = now - startTime
+                            
+                            // Increase frequency for very long responses
+                            if (elapsedTime > 30000L) { // After 30 seconds, update every 3 seconds
+                                statusUpdateInterval = 3000L
+                            } else if (elapsedTime > 15000L) { // After 15 seconds, update every 4 seconds
+                                statusUpdateInterval = 4000L
+                            }
+                            
+                            if (now - lastStatusUpdate > statusUpdateInterval && !done) {
+                                lastStatusUpdate = now
+                                val minutes = (elapsedTime / 60000).toInt()
+                                val seconds = ((elapsedTime % 60000) / 1000).toInt()
+                                
+                                val statusMessage = if (minutes > 0) {
+                                    "💭 AI processing... ${minutes}m ${seconds}s (${tokenCount} tokens)"
+                                } else {
+                                    "💭 AI processing... ${seconds}s (${tokenCount} tokens)"
+                                }
+                                
+                                Log.d("GalleryBitchatBridge", "About to send status update: '$statusMessage'")
+                                sendAiMessageThroughMesh(statusMessage, AiMessageType.RESPONSE)
+                                Log.d("GalleryBitchatBridge", "Status update sent")
+                            }
+                            
+                            // Update bubble every few tokens or when done
+                            if (tokenCount % CHUNK_SIZE == 0 || done) {
+                                val currentContent = accumulatedResponse.toString()
+                                val localViewModel = bitchatViewModel
+                                localViewModel?.viewModelScope?.launch(Dispatchers.Main) {
+                                    if (isCancelled) return@launch
+                                    
+                                    val streamingIndicator = if (done) " ✓" else " ▊"
+                                    val updatedContent = "🤖 ${model.name}: $currentContent$streamingIndicator"
+                                    
+                                    // Update the bubble using the tracked message ID
+                                    lastAiMessageId?.let { messageId ->
+                                        Log.d("GalleryBitchatBridge", "Attempting to update message ID: $messageId with: '$updatedContent'")
+                                        localViewModel.updateMessage(messageId, updatedContent)
+                                        Log.d("GalleryBitchatBridge", "Updated AI bubble: $tokenCount tokens, done=$done")
+                                        
+                                        // Verify the update worked
+                                        val foundMessage = localViewModel.findMessage(messageId)
+                                        if (foundMessage != null) {
+                                            Log.d("GalleryBitchatBridge", "Update verified: message content is now '${foundMessage.content}'")
+                                        } else {
+                                            Log.w("GalleryBitchatBridge", "Update failed: could not find message with ID $messageId after update")
+                                        }
+                                    } ?: run {
+                                        // Fallback: send as new message if we couldn't track the ID
+                                        Log.w("GalleryBitchatBridge", "Could not track AI message ID, sending as new message")
+                                        localViewModel.sendMessage(updatedContent)
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // When done, ensure final clean message
+                        if (done) {
+                            hasCompleted = true
+                            val localViewModel = bitchatViewModel
+                            localViewModel?.viewModelScope?.launch(Dispatchers.Main) {
+                                if (isCancelled) return@launch
+                                
+                                val finalResponse = accumulatedResponse.toString().trim()
+                                if (finalResponse.isNotEmpty()) {
+                                    val finalContent = "🤖 ${model.name}: $finalResponse ✓"
+                                    lastAiMessageId?.let { messageId ->
+                                        localViewModel.updateMessage(messageId, finalContent)
+                                        Log.d("GalleryBitchatBridge", "AI bubble streaming completed: '$finalResponse'")
+                                        
+                                        // NOW send the final response to all connected devices
+                                        sendAiMessageThroughMesh(
+                                            finalResponse, 
+                                            AiMessageType.RESPONSE
+                                        )
+                                        Log.d("GalleryBitchatBridge", "AI response broadcasted to mesh network: '$finalResponse'")
+                                    }
+                                } else {
+                                    // Handle empty response - notify all users
+                                    lastAiMessageId?.let { messageId ->
+                                        localViewModel.updateMessage(messageId, "🤖 ${model.name}: [No response generated] ❌")
+                                    }
+                                    sendAiMessageThroughMesh(
+                                        "🤖 AI generated an empty response. Please try rephrasing your request.",
+                                        AiMessageType.RESPONSE
+                                    )
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e("GalleryBitchatBridge", "Error in streaming callback", e)
+                        consecutiveFailures++
+                        
+                        // Handle network/processing errors
+                        if (consecutiveFailures >= 3) {
+                            isCancelled = true
+                            hasCompleted = true
+                            
+                            // Notify all users about the failure
+                            sendAiMessageThroughMesh(
+                                "❌ AI processing failed after multiple errors: ${e.message ?: "Unknown error"}",
+                                AiMessageType.RESPONSE
+                            )
+                        }
+                        
+                        val localViewModel = bitchatViewModel
+                        localViewModel?.viewModelScope?.launch(Dispatchers.Main) {
+                            lastAiMessageId?.let { messageId ->
+                                val errorMsg = if (consecutiveFailures >= 3) {
+                                    "🤖 ${model.name}: Processing failed ❌"
+                                } else {
+                                    "🤖 ${model.name}: Error during streaming: ${e.message} (retry ${consecutiveFailures}/3) ⚠️"
+                                }
+                                localViewModel.updateMessage(messageId, errorMsg)
+                            }
+                        }
+                    }
+                },
+                cleanUpListener = {
+                    Log.d("GalleryBitchatBridge", "LLM inference cleanup completed")
+                    hasCompleted = true
+                }
+            )
+            
+        } catch (e: Exception) {
+            Log.e("GalleryBitchatBridge", "Error starting AI inference", e)
+            hasCompleted = true
+            
+            // Notify all users about startup failure
+            sendAiMessageThroughMesh(
+                "❌ Failed to start AI processing: ${e.message ?: "Unknown startup error"}",
+                AiMessageType.RESPONSE
+            )
+        }
+    }
+    
+    /**
+     * Send AI status update (thinking, loading, etc.) - not a chat bubble
+     */
+    private fun sendAiStatusUpdate(status: String) {
+        // For now, send as regular message but we'll upgrade BitChat UI to handle this differently
+        bitchatViewModel?.sendMessage("⚡ $status")
+    }
+    
+    /**
+     * Send streaming AI message - real-time token updates with PROPER BUBBLE UPDATES
+     */
+    private fun sendAiStreamingMessage(messageId: String, content: String, modelName: String, isComplete: Boolean) {
+        val streamingIndicator = if (isComplete) "" else " ▊"
+        val fullContent = "🤖 $modelName: $content$streamingIndicator"
+        
+        // Create the initial message with this ID
+        bitchatViewModel?.sendMessage(fullContent)
+        
+        // Store the message ID for future updates
+        streamingMessages[messageId] = fullContent
+    }
+    
+    /**
+     * Update existing streaming message using BitChat's updateMessage
+     */
+    private fun updateAiStreamingMessage(messageId: String, content: String, isComplete: Boolean) {
+        val streamingIndicator = if (isComplete) "" else " ▊"
+        val fullContent = "🤖 AI: $content$streamingIndicator"
+        
+        // Use a simpler approach: store the BitChat message ID when we create the message
+        val storedBitchatMessageId = streamingMessageIds[messageId]
+        if (storedBitchatMessageId != null) {
+            // Update the existing message
+            bitchatViewModel?.updateMessage(storedBitchatMessageId, fullContent)
+        } else {
+            // This shouldn't happen, but fallback to sending new message
+            bitchatViewModel?.sendMessage(fullContent)
+        }
+        
+        streamingMessages[messageId] = fullContent
+    }
+    
+    
+    
+    companion object {
+        @Volatile
+        private var INSTANCE: GalleryBitchatBridge? = null
+        
+        fun getInstance(): GalleryBitchatBridge {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: GalleryBitchatBridge().also { INSTANCE = it }
+            }
+        }
+    }
+}
+
+/**
+ * Types of AI messages that can be sent through the mesh
+ */
+enum class AiMessageType {
+    TEXT,           // Regular AI-generated text
+    IMAGE,          // AI-generated images or image descriptions
+    CAPABILITIES,   // Information about available AI features
+    COLLABORATIVE_SESSION, // Starting a collaborative AI session
+    RESPONSE        // AI response to a mesh message
+}
+
+/**
+ * Types of AI processing for incoming mesh messages
+ */
+enum class AiProcessingType {
+    GENERATE_RESPONSE,  // Generate an AI response
+    CLASSIFY_CONTENT,   // Classify the message content
+    EXTRACT_SUMMARY     // Extract/generate a summary
+}
+
+/**
+ * Message from AI systems to be sent through mesh
+ */
+data class AiToMeshMessage(
+    val content: String,
+    val type: AiMessageType,
+    val metadata: Map<String, String> = emptyMap()
+)
+
+/**
+ * Message from mesh to be processed by AI
+ */
+data class MeshToAiMessage(
+    val originalMessage: String,
+    val senderInfo: String,
+    val processingType: AiProcessingType
+)
