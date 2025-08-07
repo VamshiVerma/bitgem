@@ -212,7 +212,7 @@ performAiChat(prompt, myPeerID) { response ->
 - **International Deployment**: BitGem deployment in disaster-prone regions worldwide
 - **Research Platform**: Open BitChat/AI dataset for emergency response research
 
-## 🎖️ **Why BitGem Will Win**
+## 🎖️ **Why BitGem**
 
 1. **Unprecedented Innovation**: World's first offline AI-powered mesh emergency app
 2. **Proven Foundation**: Built on robust BitChat mesh networking technology
